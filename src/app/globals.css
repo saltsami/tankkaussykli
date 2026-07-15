@@ -132,6 +132,9 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 .primary-button svg, .secondary-button svg { width: 17px; height: 17px; }
 .primary-button:disabled, .secondary-button:disabled { opacity: .55; cursor: wait; transform: none; }
 .full-width { width: 100%; }
+.danger-button { min-height: 44px; margin-top: 9px; border: 0; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; color: var(--danger); background: #fdebed; font-size: 13px; font-weight: 750; cursor: pointer; }
+.danger-button:hover { background: #f9dce0; }
+.danger-button svg { width: 17px; }
 
 .fuel-tabs {
   width: fit-content;
@@ -169,6 +172,8 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 }
 .signal-icon { width: 48px; height: 48px; border-radius: 14px; display: grid; place-items: center; color: var(--deep); background: var(--lime); }
 .signal-icon svg { width: 21px; }
+.signal-wait .signal-icon { background: #f8cf69; }
+.signal-neutral .signal-icon, .signal-collecting .signal-icon { background: #d5e8e3; }
 .signal-copy .eyebrow { color: #a9d7cf; }
 .signal-copy h2 { margin: 4px 0 3px; font-size: 22px; letter-spacing: -.025em; }
 .signal-copy > p:last-child { margin: 0; color: #c7dad6; font-size: 14px; }
@@ -237,6 +242,13 @@ button:focus-visible, a:focus-visible, input:focus-visible {
 .detail-meta { display: flex; gap: 18px; padding: 15px 0; margin-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 .detail-meta span { display: flex; align-items: center; gap: 5px; }
 .detail-meta svg { width: 14px; }
+.price-watch { width: 100%; display: grid; grid-template-columns: 34px minmax(0, 1fr) 18px; align-items: center; gap: 10px; margin: 0 0 10px; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: var(--canvas); text-align: left; cursor: pointer; }
+.price-watch:hover, .price-watch-active { background: var(--lime-soft); border-color: #b9d781; }
+.price-watch > svg:first-child { width: 18px; color: #258675; }
+.price-watch > svg:last-child { width: 16px; color: var(--muted); }
+.price-watch span { min-width: 0; display: grid; gap: 2px; }
+.price-watch strong { font-size: 12px; }
+.price-watch small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .detail-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
 
 .price-chart-wrap { position: relative; }

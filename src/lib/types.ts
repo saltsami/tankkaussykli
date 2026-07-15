@@ -18,6 +18,8 @@ export type PricePoint = {
   label: string;
   price: number;
   forecast?: boolean;
+  observedAt?: string;
+  sampleCount?: number;
 };
 
 export type Station = {
@@ -51,4 +53,19 @@ export type NearbyPriceRow = {
   latest_price: number | null;
   observed_at: string | null;
   sample_count: number | null;
+};
+
+export type NearbyHistoryRow = {
+  station_id: string;
+  observed_day: string;
+  median_price: number;
+  observation_count: number;
+};
+
+export type PriceAlertRule = {
+  id: string;
+  stationId: string;
+  stationName: string;
+  fuel: FuelType;
+  threshold: number;
 };

@@ -1,11 +1,12 @@
 "use client";
 
-import { generatedHistory } from "./demo-data";
 import { distanceInKm } from "./geo";
 import { getSupabaseBrowserClient } from "./supabase";
+import { buildPriceSeries } from "./trend";
 import type {
   Coordinates,
   FuelType,
+  NearbyHistoryRow,
   NearbyPriceRow,
   Station,
 } from "./types";
@@ -41,24 +42,31 @@ export async function enrichWithSupabasePrices(
   const supabase = getSupabaseBrowserClient();
   if (!supabase) return stations;
 
-  const { data, error } = await supabase.rpc(
-    "nearby_stations_with_latest_prices",
-    {
-      p_lat: home.lat,
-      p_lng: home.lng,
-      p_radius_km: 30,
-      p_fuel_type: fuel,
-    },
-  );
+  const parameters = {
+    p_lat: home.lat,
+    p_lng: home.lng,
+    p_radius_km: 30,
+    p_fuel_type: fuel,
+  };
+  const [latestResult, historyResult] = await Promise.all([
+    supabase.rpc("nearby_stations_with_latest_prices", parameters),
+    supabase.rpc("nearby_station_price_history", parameters),
+  ]);
 
-  if (error) {
-    throw error;
-  }
+  if (latestResult.error) throw latestResult.error;
+  if (historyResult.error) throw historyResult.error;
 
-  const rows = (data ?? []) as NearbyPriceRow[];
+  const rows = (latestResult.data ?? []) as NearbyPriceRow[];
+  const historyRows = (historyResult.data ?? []) as NearbyHistoryRow[];
   const indexedRows = new Map(
     rows.map((row) => [`${row.osm_type}-${row.osm_id}`, row]),
   );
+  const historyByStation = new Map<string, NearbyHistoryRow[]>();
+  for (const historyRow of historyRows) {
+    const stationRows = historyByStation.get(historyRow.station_id) ?? [];
+    stationRows.push(historyRow);
+    historyByStation.set(historyRow.station_id, stationRows);
+  }
 
   return stations.map((station) => {
     if (!station.osmId || station.osmType === "demo") return station;
@@ -79,7 +87,7 @@ export async function enrichWithSupabasePrices(
       },
       history: {
         ...station.history,
-        [fuel]: generatedHistory(Number(row.latest_price)),
+        [fuel]: buildPriceSeries(historyByStation.get(row.station_id) ?? []),
       },
     };
   });
@@ -114,10 +122,20 @@ export async function submitPriceObservation(
     throw new Error("Anonyymin käyttäjän luonti epäonnistui.");
   }
 
-  const { data: stationRow, error: stationError } = await supabase
+  const { data: existingStation, error: lookupError } = await supabase
     .from("stations")
-    .upsert(
-      {
+    .select("id")
+    .eq("osm_type", station.osmType)
+    .eq("osm_id", station.osmId)
+    .maybeSingle();
+
+  if (lookupError) throw lookupError;
+
+  let stationId = existingStation?.id as string | undefined;
+  if (!stationId) {
+    const { data: insertedStation, error: insertError } = await supabase
+      .from("stations")
+      .insert({
         osm_type: station.osmType,
         osm_id: station.osmId,
         name: station.name,
@@ -125,19 +143,33 @@ export async function submitPriceObservation(
         address: station.address,
         latitude: station.lat,
         longitude: station.lng,
-      },
-      { onConflict: "osm_type,osm_id" },
-    )
-    .select("id")
-    .single();
+      })
+      .select("id")
+      .single();
 
-  if (stationError) throw stationError;
+    if (insertError?.code === "23505") {
+      const { data: racedStation, error: raceLookupError } = await supabase
+        .from("stations")
+        .select("id")
+        .eq("osm_type", station.osmType)
+        .eq("osm_id", station.osmId)
+        .single();
+      if (raceLookupError) throw raceLookupError;
+      stationId = racedStation.id;
+    } else if (insertError) {
+      throw insertError;
+    } else {
+      stationId = insertedStation.id;
+    }
+  }
+
+  if (!stationId) throw new Error("Aseman tallennus epäonnistui.");
 
   const observedAt = new Date().toISOString();
   const { error: observationError } = await supabase
     .from("price_observations")
     .insert({
-      station_id: stationRow.id,
+      station_id: stationId,
       fuel_type: fuel,
       price_eur: price,
       observed_at: observedAt,

@@ -69,11 +69,6 @@ to authenticated
 with check ((select auth.uid()) is not null);
 
 drop policy if exists "authenticated users can refresh station metadata" on public.stations;
-create policy "authenticated users can refresh station metadata"
-on public.stations for update
-to authenticated
-using ((select auth.uid()) is not null)
-with check ((select auth.uid()) is not null);
 
 drop policy if exists "authenticated users can submit their observations" on public.price_observations;
 create policy "authenticated users can submit their observations"
@@ -83,7 +78,7 @@ with check (reporter_id = (select auth.uid()));
 
 revoke all on table public.stations from anon, authenticated;
 grant select on table public.stations to anon, authenticated;
-grant insert, update on table public.stations to authenticated;
+grant insert on table public.stations to authenticated;
 
 revoke all on table public.price_observations from anon, authenticated;
 grant insert on table public.price_observations to authenticated;
@@ -135,10 +130,13 @@ as $$
     and p_lng between 19 and 32
     and p_radius_km between 1 and 100
     and 6371 * 2 * asin(
-      sqrt(
-        power(sin(radians(s.latitude - p_lat) / 2), 2) +
-        cos(radians(p_lat)) * cos(radians(s.latitude)) *
-        power(sin(radians(s.longitude - p_lng) / 2), 2)
+      least(
+        1,
+        sqrt(
+          power(sin(radians(s.latitude - p_lat) / 2), 2) +
+          cos(radians(p_lat)) * cos(radians(s.latitude)) *
+          power(sin(radians(s.longitude - p_lng) / 2), 2)
+        )
       )
     ) <= p_radius_km
   order by latest.price_eur asc, latest.observed_at desc;

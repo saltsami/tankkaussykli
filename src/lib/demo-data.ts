@@ -109,6 +109,20 @@ export const DEMO_STATIONS: Station[] = [
   },
 ];
 
+export function demoStationsFor(home: Coordinates) {
+  if (home.label === DEFAULT_HOME.label) return DEMO_STATIONS;
+
+  const latitudeDelta = home.lat - DEFAULT_HOME.lat;
+  const longitudeDelta = home.lng - DEFAULT_HOME.lng;
+  return DEMO_STATIONS.map((station) => ({
+    ...station,
+    name: `${station.brand} ${home.label}`,
+    address: `Esimerkkiasema · ${home.label}`,
+    lat: station.lat + latitudeDelta,
+    lng: station.lng + longitudeDelta,
+  }));
+}
+
 export function generatedHistory(price: number): PricePoint[] {
   return history(price);
 }

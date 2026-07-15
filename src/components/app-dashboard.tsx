@@ -14,12 +14,20 @@ import {
   Route,
   Sparkles,
 } from "lucide-react";
-import { DEMO_STATIONS, DEFAULT_HOME, generatedHistory } from "@/lib/demo-data";
+import { DEMO_STATIONS, DEFAULT_HOME, demoStationsFor, generatedHistory } from "@/lib/demo-data";
 import { formatDistance, withDistances } from "@/lib/geo";
 import { discoverStations, enrichWithSupabasePrices } from "@/lib/station-service";
 import { isSupabaseConfigured } from "@/lib/supabase";
-import { FUEL_TYPES, type Coordinates, type FuelType, type Station } from "@/lib/types";
+import { getTankSignal, upsertObservedPrice } from "@/lib/trend";
+import {
+  FUEL_TYPES,
+  type Coordinates,
+  type FuelType,
+  type PriceAlertRule,
+  type Station,
+} from "@/lib/types";
 import { LocationSheet } from "./location-sheet";
+import { PriceAlertSheet } from "./price-alert-sheet";
 import { PriceChart } from "./price-chart";
 import { ReportPriceSheet } from "./report-price-sheet";
 
@@ -29,6 +37,14 @@ const StationMap = dynamic(() => import("./station-map"), {
 });
 
 const HOME_STORAGE_KEY = "tankkaussykli.home.v1";
+const ALERT_STORAGE_KEY = "tankkaussykli.alerts.v1";
+const ALERT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+
+function stationAlertKey(station: Station) {
+  return station.isDemo
+    ? `${station.id}@${station.lat.toFixed(4)},${station.lng.toFixed(4)}`
+    : station.id;
+}
 
 function formatFreshness(isoDate?: string) {
   if (!isoDate) return "Ei hintahavaintoa";
@@ -53,6 +69,8 @@ export function AppDashboard() {
   const [statusMessage, setStatusMessage] = useState("Esimerkkihinnat – yhdistä Supabase live-dataa varten");
   const [locationOpen, setLocationOpen] = useState(false);
   const [reportStation, setReportStation] = useState<Station | null>(null);
+  const [alertStation, setAlertStation] = useState<Station | null>(null);
+  const [alertRules, setAlertRules] = useState<PriceAlertRule[]>([]);
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState("");
 
@@ -70,12 +88,67 @@ export function AppDashboard() {
     }
   }, []);
 
+  useEffect(() => {
+    const saved = window.localStorage.getItem(ALERT_STORAGE_KEY);
+    if (!saved) return;
+    try {
+      const parsed = JSON.parse(saved) as PriceAlertRule[];
+      const valid = parsed.filter(
+        (rule) =>
+          rule.id &&
+          rule.stationId &&
+          FUEL_TYPES.includes(rule.fuel) &&
+          Number.isFinite(rule.threshold),
+      );
+      const timer = window.setTimeout(() => setAlertRules(valid), 0);
+      return () => window.clearTimeout(timer);
+    } catch {
+      window.localStorage.removeItem(ALERT_STORAGE_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.register("/sw.js");
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    if (!("serviceWorker" in navigator)) return;
+
+    const now = Date.now();
+    for (const rule of alertRules) {
+      const station = stations.find(
+        (candidate) => stationAlertKey(candidate) === rule.stationId,
+      );
+      const snapshot = station?.prices[rule.fuel];
+      if (!station || !snapshot || snapshot.price > rule.threshold) continue;
+
+      const notificationKey = `tankkaussykli.notified.${rule.id}`;
+      const previous = Number(window.localStorage.getItem(notificationKey) ?? 0);
+      if (now - previous < ALERT_COOLDOWN_MS) continue;
+
+      window.localStorage.setItem(notificationKey, now.toString());
+      void navigator.serviceWorker.ready
+        .then((registration) =>
+          registration.showNotification("Hintavahti: halpa hinta löytyi", {
+            body: `${station.name} · ${rule.fuel} ${snapshot.price.toFixed(3)} €/l`,
+            icon: "/app-icon.svg",
+            tag: rule.id,
+          }),
+        )
+        .catch(() => undefined);
+    }
+  }, [alertRules, stations]);
+
   const loadStations = useCallback(async () => {
     if (!isSupabaseConfigured()) {
-      setStations(withDistances(DEMO_STATIONS, home));
+      const demoStations = withDistances(demoStationsFor(home), home);
+      setStations(demoStations);
       setSelectedId((current) => current || DEMO_STATIONS[0].id);
       setStatus("demo");
-      setStatusMessage("Esimerkkihinnat – lisää Supabase-avaimet live-tilaa varten");
+      setStatusMessage(`Esimerkkihinnat alueelle ${home.label} – lisää Supabase-avaimet live-tilaa varten`);
       return;
     }
 
@@ -101,7 +174,7 @@ export function AppDashboard() {
           : "Asemat löytyivät – ensimmäisiä hintahavaintoja odotetaan",
       );
     } catch {
-      setStations(withDistances(DEMO_STATIONS, home));
+      setStations(withDistances(demoStationsFor(home), home));
       setSelectedId(DEMO_STATIONS[0].id);
       setStatus("demo");
       setStatusMessage("Datapalvelu ei vastannut – näytetään esimerkkihinnat");
@@ -132,6 +205,10 @@ export function AppDashboard() {
     ? localPrices.reduce((sum, price) => sum + price, 0) / localPrices.length
     : null;
   const savingPerTank = cheapest && average ? Math.max(0, (average - priceFor(cheapest, fuel)) * 50) : 0;
+  const tankSignal = getTankSignal(
+    cheapest?.history[fuel] ?? [],
+    cheapest?.prices[fuel]?.price,
+  );
 
   function saveHome(nextHome: Coordinates) {
     setHome(nextHome);
@@ -177,12 +254,50 @@ export function AppDashboard() {
           ? {
               ...station,
               prices: { ...station.prices, [fuel]: { price, observedAt, sampleCount: 1 } },
-              history: { ...station.history, [fuel]: generatedHistory(price) },
+              history: {
+                ...station.history,
+                [fuel]: station.isDemo
+                  ? generatedHistory(price)
+                  : upsertObservedPrice(station.history[fuel] ?? [], price, observedAt),
+              },
             }
           : station,
       ),
     );
   }
+
+  async function savePriceAlert(station: Station, threshold: number) {
+    if ("Notification" in window && Notification.permission === "default") {
+      await Notification.requestPermission();
+    }
+
+    const stationId = stationAlertKey(station);
+    const id = `${stationId}:${fuel}`;
+    const rule: PriceAlertRule = {
+      id,
+      stationId,
+      stationName: station.name,
+      fuel,
+      threshold,
+    };
+    const nextRules = [...alertRules.filter((candidate) => candidate.id !== id), rule];
+    setAlertRules(nextRules);
+    window.localStorage.setItem(ALERT_STORAGE_KEY, JSON.stringify(nextRules));
+  }
+
+  function deletePriceAlert(station: Station) {
+    const id = `${stationAlertKey(station)}:${fuel}`;
+    const nextRules = alertRules.filter((candidate) => candidate.id !== id);
+    setAlertRules(nextRules);
+    window.localStorage.setItem(ALERT_STORAGE_KEY, JSON.stringify(nextRules));
+    window.localStorage.removeItem(`tankkaussykli.notified.${id}`);
+  }
+
+  const selectedAlert = selected
+    ? alertRules.find(
+        (rule) => rule.id === `${stationAlertKey(selected)}:${fuel}`,
+      )
+    : undefined;
 
   return (
     <main className="app-shell">
@@ -222,14 +337,14 @@ export function AppDashboard() {
         ))}
       </nav>
 
-      <section className="signal-card" aria-labelledby="signal-title">
+      <section className={`signal-card signal-${tankSignal.state}`} aria-labelledby="signal-title">
         <div className="signal-icon"><Bell aria-hidden="true" /></div>
         <div className="signal-copy">
           <p className="eyebrow">Tämän hetken signaali</p>
-          <h2 id="signal-title">{cheapest ? "Hyvä hetki vertailla" : "Hintahavaintoja odotetaan"}</h2>
+          <h2 id="signal-title">{tankSignal.title}</h2>
           <p>
             {cheapest
-              ? `${cheapest.name} on alueen edullisin: ${priceFor(cheapest, fuel).toFixed(3)} €/l.`
+              ? `${cheapest.name}: ${priceFor(cheapest, fuel).toFixed(3)} €/l. ${tankSignal.detail}`
               : "Ilmoita ensimmäinen pumpulla näkemäsi hinta."}
           </p>
         </div>
@@ -320,6 +435,22 @@ export function AppDashboard() {
               <span><Route aria-hidden="true" /> {formatDistance(selected.distanceKm)} päässä</span>
               <span><Clock3 aria-hidden="true" /> {formatFreshness(selected.prices[fuel]?.observedAt)}</span>
             </div>
+            <button
+              className={`price-watch${selectedAlert ? " price-watch-active" : ""}`}
+              type="button"
+              onClick={() => setAlertStation(selected)}
+            >
+              <Bell aria-hidden="true" />
+              <span>
+                <strong>{selectedAlert ? "Hintavahti käytössä" : "Aseta hintavahti"}</strong>
+                <small>
+                  {selectedAlert
+                    ? `Ilmoita, kun ${fuel} ≤ ${selectedAlert.threshold.toFixed(3)} €/l`
+                    : "Saat ilmoituksen, kun oma hintarajasi alittuu"}
+                </small>
+              </span>
+              <ChevronRight aria-hidden="true" />
+            </button>
             <PriceChart points={selected.history[fuel] ?? []} />
             <div className="detail-actions">
               <a
@@ -357,6 +488,19 @@ export function AppDashboard() {
           fuel={fuel}
           onClose={() => setReportStation(null)}
           onSaved={updateReportedPrice}
+        />
+      )}
+      {alertStation && (
+        <PriceAlertSheet
+          key={`${stationAlertKey(alertStation)}-${fuel}`}
+          station={alertStation}
+          fuel={fuel}
+          currentRule={alertRules.find(
+            (rule) => rule.id === `${stationAlertKey(alertStation)}:${fuel}`,
+          )}
+          onClose={() => setAlertStation(null)}
+          onSave={(threshold) => savePriceAlert(alertStation, threshold)}
+          onDelete={() => deletePriceAlert(alertStation)}
         />
       )}
     </main>

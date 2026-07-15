@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useRef } from "react";
 import L from "leaflet";
-import { MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import type { Coordinates, FuelType, Station } from "@/lib/types";
 
 type StationMapProps = {
@@ -12,16 +11,6 @@ type StationMapProps = {
   selectedId?: string;
   onSelect: (station: Station) => void;
 };
-
-function RecenterMap({ home }: { home: Coordinates }) {
-  const map = useMap();
-
-  useEffect(() => {
-    map.flyTo([home.lat, home.lng], 11, { duration: 0.7 });
-  }, [home, map]);
-
-  return null;
-}
 
 function stationIcon(price: number | undefined, selected: boolean) {
   const label = price ? price.toFixed(3) : "–";
@@ -43,6 +32,24 @@ function homeIcon() {
   });
 }
 
+function stationPopup(station: Station, fuel: FuelType) {
+  const container = document.createElement("div");
+  const name = document.createElement("strong");
+  const price = document.createElement("span");
+  name.textContent = station.name;
+  price.textContent = station.prices[fuel]
+    ? `${station.prices[fuel]!.price.toFixed(3)} €/l`
+    : "Ei tuoretta hintaa";
+  container.append(name, document.createElement("br"), price);
+  return container;
+}
+
+function homePopup(label: string) {
+  const container = document.createElement("span");
+  container.textContent = `Kotipaikka: ${label}`;
+  return container;
+}
+
 export default function StationMap({
   home,
   stations,
@@ -50,52 +57,78 @@ export default function StationMap({
   selectedId,
   onSelect,
 }: StationMapProps) {
-  const tileUrl =
-    process.env.NEXT_PUBLIC_MAP_TILE_URL ??
-    "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
-  const attribution =
-    process.env.NEXT_PUBLIC_MAP_ATTRIBUTION ??
-    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
-  const icons = useMemo(
-    () =>
-      new Map(
-        stations.map((station) => [
-          station.id,
-          stationIcon(station.prices[fuel]?.price, station.id === selectedId),
-        ]),
-      ),
-    [fuel, selectedId, stations],
-  );
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const markerLayerRef = useRef<L.LayerGroup | null>(null);
+  const onSelectRef = useRef(onSelect);
+
+  useEffect(() => {
+    onSelectRef.current = onSelect;
+  }, [onSelect]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const map = L.map(container, { scrollWheelZoom: true }).setView(
+      [home.lat, home.lng],
+      11,
+    );
+    const tileUrl =
+      process.env.NEXT_PUBLIC_MAP_TILE_URL ??
+      "https://tile.openstreetmap.org/{z}/{x}/{y}.png";
+    const attribution =
+      process.env.NEXT_PUBLIC_MAP_ATTRIBUTION ??
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
+
+    L.tileLayer(tileUrl, { attribution, maxZoom: 19 }).addTo(map);
+    markerLayerRef.current = L.layerGroup().addTo(map);
+    mapRef.current = map;
+
+    return () => {
+      markerLayerRef.current = null;
+      mapRef.current = null;
+      map.remove();
+      delete (container as HTMLDivElement & { _leaflet_id?: number })._leaflet_id;
+    };
+    // Kartta alustetaan vain konttia varten; koti ja asemat päivitetään alla.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const layer = markerLayerRef.current;
+    if (!map || !layer) return;
+
+    layer.clearLayers();
+    map.setView([home.lat, home.lng], 11, { animate: false });
+
+    L.marker([home.lat, home.lng], {
+      icon: homeIcon(),
+      keyboard: true,
+      title: `Kotipaikka: ${home.label}`,
+    })
+      .bindPopup(homePopup(home.label))
+      .addTo(layer);
+
+    for (const station of stations) {
+      const marker = L.marker([station.lat, station.lng], {
+        icon: stationIcon(station.prices[fuel]?.price, station.id === selectedId),
+        keyboard: true,
+        title: station.name,
+      });
+      marker.bindPopup(stationPopup(station, fuel));
+      marker.on("click", () => onSelectRef.current(station));
+      marker.addTo(layer);
+    }
+  }, [fuel, home, selectedId, stations]);
 
   return (
-    <MapContainer
-      center={[home.lat, home.lng]}
-      zoom={11}
-      scrollWheelZoom
+    <div
+      ref={containerRef}
       className="station-map"
+      role="region"
       aria-label="Kartta lähialueen polttoaineasemista"
-    >
-      <TileLayer url={tileUrl} attribution={attribution} maxZoom={19} />
-      <RecenterMap home={home} />
-      <Marker position={[home.lat, home.lng]} icon={homeIcon()}>
-        <Popup>Kotipaikka: {home.label}</Popup>
-      </Marker>
-      {stations.map((station) => (
-        <Marker
-          key={station.id}
-          position={[station.lat, station.lng]}
-          icon={icons.get(station.id)!}
-          eventHandlers={{ click: () => onSelect(station) }}
-        >
-          <Popup>
-            <strong>{station.name}</strong>
-            <br />
-            {station.prices[fuel]
-              ? `${station.prices[fuel]!.price.toFixed(3)} €/l`
-              : "Ei tuoretta hintaa"}
-          </Popup>
-        </Marker>
-      ))}
-    </MapContainer>
+    />
   );
 }

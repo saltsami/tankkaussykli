@@ -30,6 +30,7 @@ export function PriceChart({ points }: PriceChartProps) {
       (height - padding.top - padding.bottom);
 
   const observedPoints = points.filter((point) => !point.forecast);
+  const hasForecast = points.some((point) => point.forecast);
   const forecastStart = Math.max(observedPoints.length - 1, 0);
   const observedPath = points
     .slice(0, observedPoints.length)
@@ -97,7 +98,7 @@ export function PriceChart({ points }: PriceChartProps) {
       </svg>
       <div className="chart-legend" aria-hidden="true">
         <span><i className="legend-line" /> Toteutunut</span>
-        <span><i className="legend-line legend-line-forecast" /> Arvio</span>
+        {hasForecast && <span><i className="legend-line legend-line-forecast" /> Viikonpäiväarvio</span>}
       </div>
     </div>
   );
