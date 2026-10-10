@@ -1,0 +1,33 @@
+name: Scheduled price alerts
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: price-alerts-production
+  cancel-in-progress: false
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Call authenticated production worker
+        env:
+          PRICE_ALERT_BASE_URL: ${{ secrets.PRICE_ALERT_BASE_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$PRICE_ALERT_BASE_URL" || -z "$CRON_SECRET" ]]; then
+            echo "Configure PRICE_ALERT_BASE_URL and CRON_SECRET repository secrets to enable the deployed worker."
+            exit 1
+          fi
+          if [[ "$PRICE_ALERT_BASE_URL" != https://* ]]; then
+            echo "PRICE_ALERT_BASE_URL must use HTTPS."
+            exit 1
+          fi
+          curl --fail --silent --show-error --max-time 55 \
+            --header "Authorization: Bearer $CRON_SECRET" \
+            "${PRICE_ALERT_BASE_URL%/}/api/cron/price-alerts"

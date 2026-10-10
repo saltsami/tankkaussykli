@@ -68,4 +68,7 @@ export type PriceAlertRule = {
   stationName: string;
   fuel: FuelType;
   threshold: number;
+  delivery?: "local" | "push";
+  serverRuleId?: string;
+  pushEnabled?: boolean;
 };

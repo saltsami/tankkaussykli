@@ -9,8 +9,8 @@ type PriceAlertSheetProps = {
   fuel: FuelType;
   currentRule?: PriceAlertRule;
   onClose: () => void;
-  onSave: (threshold: number) => Promise<void>;
-  onDelete: () => void;
+  onSave: (threshold: number, background: boolean) => Promise<void>;
+  onDelete: () => Promise<void>;
 };
 
 export function PriceAlertSheet({
@@ -24,6 +24,7 @@ export function PriceAlertSheet({
   const [value, setValue] = useState(() =>
     (currentRule?.threshold ?? station.prices[fuel]?.price ?? 1.75).toFixed(3),
   );
+  const [background, setBackground] = useState(currentRule?.delivery === "push" || (!currentRule && !station.isDemo));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -37,9 +38,12 @@ export function PriceAlertSheet({
 
     setSaving(true);
     setError("");
-    await onSave(threshold);
-    setSaving(false);
-    onClose();
+    try {
+      await onSave(threshold, background);
+      onClose();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Hintavahdin tallennus epäonnistui.");
+    } finally { setSaving(false); }
   }
 
   return (
@@ -76,10 +80,18 @@ export function PriceAlertSheet({
             />
             <span>€/l</span>
           </div>
+          <button className="secondary-button" type="button" onClick={() => setValue("2.000")}>Aseta 2,000 €/l</button>
+          <label className="sheet-note" style={{ display: "block", marginTop: "1rem" }}>
+            <input type="checkbox" checked={background} disabled={station.isDemo || currentRule?.delivery === "push"}
+              onChange={(event) => setBackground(event.target.checked)} /> Taustavahti myös selaimen ollessa suljettuna
+          </label>
+          {currentRule?.pushEnabled === false && <p className="form-message error-message">Push-tilaus on vanhentunut. Tallenna vahti uudelleen aktivoidaksesi ilmoitukset.</p>}
           {error && <p className="form-message error-message">{error}</p>}
           <p className="sheet-note">
-            Raja tallennetaan tälle laitteelle. MVP tarkistaa sen, kun sovellus on auki tai avataan.
-            Selain voi pyytää ilmoitusluvan tallennuksen yhteydessä.
+            {background
+              ? "Raja tallennetaan palvelimelle. Tuore yhteisöhavainto voi käynnistää Web Push -ilmoituksen. Taustavahti edellyttää palvelun käyttöönottoa ja ilmoituslupaa."
+              : "Paikallinen vahti tarkistaa enintään 24 tuntia vanhat havainnot sovelluksen ollessa auki. Esimerkkihinnoista ei lähetetä ilmoituksia."}
+            {currentRule?.delivery === "push" && " Poista taustavahti ensin, jos haluat vaihtaa paikalliseen vahtiin."}
           </p>
           <button className="primary-button full-width" type="submit" disabled={saving}>
             {currentRule ? <Check aria-hidden="true" /> : <Bell aria-hidden="true" />}
@@ -89,9 +101,12 @@ export function PriceAlertSheet({
             <button
               className="danger-button full-width"
               type="button"
-              onClick={() => {
-                onDelete();
-                onClose();
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true); setError("");
+                try { await onDelete(); onClose(); }
+                catch (reason) { setError(reason instanceof Error ? reason.message : "Poistaminen epäonnistui."); }
+                finally { setSaving(false); }
               }}
             >
               <BellOff aria-hidden="true" /> Poista hintavahti
