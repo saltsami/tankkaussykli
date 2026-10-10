@@ -13,7 +13,8 @@ Sovellus toimii ilman ympäristömuuttujia esittelytilassa. Kun Supabase on yhdi
 - valitun aseman oikeista hintahavainnoista muodostettu 8 viikon historia
 - kolmen päivän viikonpäiväarvio, kun toteutuneita hintapäiviä on vähintään 14
 - asemakohtainen halpa-, normaali- tai odota-signaali
-- laitekohtainen hintavahti ja järjestelmäilmoitus, kun oma hintaraja alittuu
+- paikallinen hintavahti sekä palvelimelle tallennettava, selaimen ollessa suljettuna toimiva Web Push -vahti
+- havaintojen tuoreusraja, toimitusjono, uudelleenyritykset ja hälytysten toiston esto
 - anonyymi yhteisöhinnan ilmoittaminen Supabaseen
 - Row Level Security -säännöt ja rajattu hintojen lukufunktio
 - responsiivinen PWA-manifesti ja Vercel-valmis tuotantobuild
@@ -29,7 +30,9 @@ Sovellus toimii ilman ympäristömuuttujia esittelytilassa. Kun Supabase on yhdi
 
 Kotipaikkaa ei tallenneta Supabaseen. Se säilyy selaimen `localStorage`-muistissa. Koordinaatteja käytetään vain lähiasemien ja hintojen hakemiseen.
 
-Myös hintavahtien rajat säilyvät tässä MVP:ssä vain käyttäjän laitteella. Sovellus tarkistaa ne avattaessa ja käytön aikana. Täysin taustalla toimiva Web Push edellyttää myöhemmässä vaiheessa VAPID-avaimia ja palvelinpuolista hintahavaintojen käynnistämää push-lähetystä.
+Paikalliset hintavahdit säilyvät käyttäjän laitteella ja toimivat sovelluksen ollessa auki. Taustavahti tallentaa säännön ja Web Push -tilauksen Supabaseen; palvelimen ajastettu API tarkistaa aidot, oletuksena enintään 24 tuntia vanhat havainnot myös selaimen ollessa suljettuna. Havaintoja ei päivitetä uusiksi tarkistuksen yhteydessä. Bensiinille ja dieselille voi asettaa 2,000 €/l rajan (enintään-semanttiikka).
+
+Taustavahti tarvitsee Supabase-migraation, palvelinavaimen, VAPID-avaimet, HTTPS-julkaisun ja ajastuksen käyttöönoton. Katso [toteutus, käyttöönotto ja datalähteen rajat](docs/price-alerts.md). Koodi ei hanki uusia hintoja ulkoisesta hintapalvelusta.
 
 ## Paikallinen käynnistys
 
@@ -77,6 +80,7 @@ Kasvavan tuotantoliikenteen kanssa käytä sopimukseen perustuvaa geokoodaus-, a
 ```bash
 npm run lint
 npm run typecheck
+npm test
 npm run build
 ```
 
@@ -95,7 +99,7 @@ Server-only muuttujat `OVERPASS_API_URL`, `NOMINATIM_API_URL` ja `NOMINATIM_EMAI
 ## Seuraavat tuotantovaiheet
 
 - pidemmän aikavälin ennustemalli nykyisen läpinäkyvän viikonpäivämediaanin tilalle
-- taustalla toimivat Web Push -tilaukset Supabase Edge Functionin tai muun push-workerin kautta
+- taustavahdin käyttöönotto, toimituksen tuotantovalvonta ja pysyvän käyttäjätilin palautus
 - väärien havaintojen poikkeamasuodatus ja käyttäjäkohtainen nopeusrajoitus
 - kumppanuus jatkuvaan kaupalliseen asemakohtaiseen hintadataan
 - reitin varrella olevien asemien vertailu

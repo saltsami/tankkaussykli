@@ -17,6 +17,8 @@ import {
 import { DEMO_STATIONS, DEFAULT_HOME, demoStationsFor, generatedHistory } from "@/lib/demo-data";
 import { formatDistance, withDistances } from "@/lib/geo";
 import { discoverStations, enrichWithSupabasePrices } from "@/lib/station-service";
+import { deleteBackgroundAlert, loadBackgroundAlerts, saveBackgroundAlert } from "@/lib/price-alert-client";
+import { shouldNotifyLocally } from "@/lib/local-alert-policy";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import { getTankSignal, upsertObservedPrice } from "@/lib/trend";
 import {
@@ -38,7 +40,6 @@ const StationMap = dynamic(() => import("./station-map"), {
 
 const HOME_STORAGE_KEY = "tankkaussykli.home.v1";
 const ALERT_STORAGE_KEY = "tankkaussykli.alerts.v1";
-const ALERT_COOLDOWN_MS = 12 * 60 * 60 * 1000;
 
 function stationAlertKey(station: Station) {
   return station.isDemo
@@ -71,10 +72,13 @@ export function AppDashboard() {
   const [reportStation, setReportStation] = useState<Station | null>(null);
   const [alertStation, setAlertStation] = useState<Station | null>(null);
   const [alertRules, setAlertRules] = useState<PriceAlertRule[]>([]);
+  const [alertStatus, setAlertStatus] = useState("");
   const [locating, setLocating] = useState(false);
   const [locationError, setLocationError] = useState("");
 
   useEffect(() => {
+    const linkedFuel = new URLSearchParams(window.location.search).get("fuel") as FuelType;
+    if (FUEL_TYPES.includes(linkedFuel)) window.setTimeout(() => setFuel(linkedFuel), 0);
     const saved = window.localStorage.getItem(HOME_STORAGE_KEY);
     if (!saved) return;
     try {
@@ -89,27 +93,8 @@ export function AppDashboard() {
   }, []);
 
   useEffect(() => {
-    const saved = window.localStorage.getItem(ALERT_STORAGE_KEY);
-    if (!saved) return;
-    try {
-      const parsed = JSON.parse(saved) as PriceAlertRule[];
-      const valid = parsed.filter(
-        (rule) =>
-          rule.id &&
-          rule.stationId &&
-          FUEL_TYPES.includes(rule.fuel) &&
-          Number.isFinite(rule.threshold),
-      );
-      const timer = window.setTimeout(() => setAlertRules(valid), 0);
-      return () => window.clearTimeout(timer);
-    } catch {
-      window.localStorage.removeItem(ALERT_STORAGE_KEY);
-    }
-  }, []);
-
-  useEffect(() => {
     if ("serviceWorker" in navigator) {
-      void navigator.serviceWorker.register("/sw.js");
+      void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
     }
   }, []);
 
@@ -119,28 +104,52 @@ export function AppDashboard() {
 
     const now = Date.now();
     for (const rule of alertRules) {
-      const station = stations.find(
-        (candidate) => stationAlertKey(candidate) === rule.stationId,
-      );
+      if (rule.delivery === "push") continue;
+      const station = stations.find((candidate) => stationAlertKey(candidate) === rule.stationId);
       const snapshot = station?.prices[rule.fuel];
-      if (!station || !snapshot || snapshot.price > rule.threshold) continue;
-
-      const notificationKey = `tankkaussykli.notified.${rule.id}`;
-      const previous = Number(window.localStorage.getItem(notificationKey) ?? 0);
-      if (now - previous < ALERT_COOLDOWN_MS) continue;
-
-      window.localStorage.setItem(notificationKey, now.toString());
-      void navigator.serviceWorker.ready
-        .then((registration) =>
-          registration.showNotification("Hintavahti: halpa hinta löytyi", {
-            body: `${station.name} · ${rule.fuel} ${snapshot.price.toFixed(3)} €/l`,
-            icon: "/app-icon.svg",
-            tag: rule.id,
-          }),
-        )
-        .catch(() => undefined);
+      if (!station || !snapshot) continue;
+      const key = `tankkaussykli.notified.${rule.id}`;
+      let previous: { observedAt?: string; notifiedAt?: number } = {};
+      try {
+        const stored = JSON.parse(window.localStorage.getItem(key) ?? "{}");
+        previous = typeof stored === "number" ? { notifiedAt: stored } : stored ?? {};
+      } catch { /* An old malformed cooldown record is ignored. */ }
+      if (!shouldNotifyLocally(snapshot.observedAt, snapshot.price, rule.threshold, previous, now, !!station.isDemo)) continue;
+      // Persist before the async call to avoid duplicate concurrent effects; undo on failure.
+      const next = JSON.stringify({ observedAt: snapshot.observedAt, notifiedAt: now });
+      window.localStorage.setItem(key, next);
+      void navigator.serviceWorker.ready.then((registration) => registration.showNotification("Hintavahti: hintaraja täyttyi", {
+        body: `${station.name} · ${rule.fuel} ${snapshot.price.toFixed(3)} €/l · ${formatFreshness(snapshot.observedAt)}`,
+        icon: "/app-icon.svg", tag: rule.id,
+      })).catch(() => { if (window.localStorage.getItem(key) === next) window.localStorage.removeItem(key); });
     }
   }, [alertRules, stations]);
+
+  useEffect(() => {
+    let active = true;
+    const timer = window.setTimeout(() => {
+      let local: PriceAlertRule[] = [];
+      try {
+        const parsed = JSON.parse(window.localStorage.getItem(ALERT_STORAGE_KEY) ?? "[]") as PriceAlertRule[];
+        local = parsed.filter((rule) => rule && rule.id && rule.stationId && FUEL_TYPES.includes(rule.fuel) && Number.isFinite(rule.threshold));
+      } catch { window.localStorage.removeItem(ALERT_STORAGE_KEY); }
+      setAlertRules(local);
+      void loadBackgroundAlerts().then((rules) => {
+        if (!active) return;
+        if (rules === null) {
+          if (local.some((rule) => rule.delivery === "push")) setAlertStatus("Taustavahtien palveluasetukset tai aiempi käyttäjäistunto puuttuvat. Palvelintilaa ei voitu tarkistaa.");
+          return;
+        }
+        setAlertRules((current) => {
+          const serverIds = new Set(rules.map((rule) => rule.id));
+          const merged = [...current.filter((rule) => rule.delivery !== "push" && !serverIds.has(rule.id)), ...rules];
+          window.localStorage.setItem(ALERT_STORAGE_KEY, JSON.stringify(merged));
+          return merged;
+        });
+      }).catch(() => { if (active) setAlertStatus("Taustavahtien tilaa ei saatu palvelimelta. Tallennetut vahdit säilyvät; yritä päivittää sivu."); });
+    }, 0);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, []);
 
   const loadStations = useCallback(async () => {
     if (!isSupabaseConfigured()) {
@@ -164,7 +173,9 @@ export function AppDashboard() {
           : a.distanceKm - b.distanceKm;
       });
       setStations(sorted);
+      const linkedStation = new URLSearchParams(window.location.search).get("station");
       setSelectedId((current) =>
+        linkedStation && sorted.some((station) => station.id === linkedStation) ? linkedStation :
         sorted.some((station) => station.id === current) ? current : (sorted[0]?.id ?? ""),
       );
       setStatus("live");
@@ -266,27 +277,36 @@ export function AppDashboard() {
     );
   }
 
-  async function savePriceAlert(station: Station, threshold: number) {
-    if ("Notification" in window && Notification.permission === "default") {
+  async function savePriceAlert(station: Station, threshold: number, background: boolean) {
+    if (!background && "Notification" in window && Notification.permission === "default") {
       await Notification.requestPermission();
     }
 
     const stationId = stationAlertKey(station);
     const id = `${stationId}:${fuel}`;
+    const serverRuleId = background ? await saveBackgroundAlert(station, fuel, threshold) : undefined;
     const rule: PriceAlertRule = {
       id,
       stationId,
       stationName: station.name,
       fuel,
       threshold,
+      delivery: background ? "push" : "local",
+      serverRuleId,
+      pushEnabled: background ? true : undefined,
     };
     const nextRules = [...alertRules.filter((candidate) => candidate.id !== id), rule];
     setAlertRules(nextRules);
     window.localStorage.setItem(ALERT_STORAGE_KEY, JSON.stringify(nextRules));
   }
 
-  function deletePriceAlert(station: Station) {
+  async function deletePriceAlert(station: Station) {
     const id = `${stationAlertKey(station)}:${fuel}`;
+    const rule = alertRules.find((candidate) => candidate.id === id);
+    if (rule?.delivery === "push") {
+      if (!rule.serverRuleId) throw new Error("Taustavahdin tunniste puuttuu. Päivitä sivu.");
+      await deleteBackgroundAlert(rule.serverRuleId);
+    }
     const nextRules = alertRules.filter((candidate) => candidate.id !== id);
     setAlertRules(nextRules);
     window.localStorage.setItem(ALERT_STORAGE_KEY, JSON.stringify(nextRules));
@@ -364,6 +384,7 @@ export function AppDashboard() {
         </button>
       </div>
 
+      {alertStatus && <p className="inline-alert" role="status">{alertStatus}</p>}
       {locationError && <p className="inline-alert">{locationError}</p>}
 
       <section className="map-section" aria-labelledby="map-title">
@@ -445,7 +466,7 @@ export function AppDashboard() {
                 <strong>{selectedAlert ? "Hintavahti käytössä" : "Aseta hintavahti"}</strong>
                 <small>
                   {selectedAlert
-                    ? `Ilmoita, kun ${fuel} ≤ ${selectedAlert.threshold.toFixed(3)} €/l`
+                    ? `${selectedAlert.delivery === "push" ? selectedAlert.pushEnabled === false ? "Push vanhentunut" : "Taustavahti" : "Vain sovelluksen ollessa auki"}: ${fuel} ≤ ${selectedAlert.threshold.toFixed(3)} €/l`
                     : "Saat ilmoituksen, kun oma hintarajasi alittuu"}
                 </small>
               </span>
@@ -499,7 +520,7 @@ export function AppDashboard() {
             (rule) => rule.id === `${stationAlertKey(alertStation)}:${fuel}`,
           )}
           onClose={() => setAlertStation(null)}
-          onSave={(threshold) => savePriceAlert(alertStation, threshold)}
+          onSave={(threshold, background) => savePriceAlert(alertStation, threshold, background)}
           onDelete={() => deletePriceAlert(alertStation)}
         />
       )}
